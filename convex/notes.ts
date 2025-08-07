@@ -1,24 +1,42 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+} from "./_generated/server";
 import { v } from "convex/values";
 
-export const createNote = mutation({
+export const createNoteWithEmbeddings = internalMutation({
   args: {
     title: v.string(),
     body: v.string(),
+    userId: v.id("users"),
+    embeddings: v.array(
+      v.object({
+        embedding: v.array(v.float64()),
+        content: v.string(),
+      })
+    ),
   },
   returns: v.id("notes"),
   handler: async (ctx, args) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) {
-      throw new Error("User must be authenticated to create a note");
-    }
-
-    return await ctx.db.insert("notes", {
+    const noteId = await ctx.db.insert("notes", {
       title: args.title,
       body: args.body,
-      userId,
+      userId: args.userId,
     });
+
+    for (const embeddingData of args.embeddings) {
+      await ctx.db.insert("noteEmbeddings", {
+        content: embeddingData.content,
+        embedding: embeddingData.embedding,
+        noteId,
+        userId: args.userId,
+      });
+    }
+
+    return noteId;
   },
 });
 
@@ -42,6 +60,15 @@ export const deleteNote = mutation({
       throw new Error("User is not authorized to delete this note");
     }
 
+    const embeddings = await ctx.db
+      .query("noteEmbeddings")
+      .withIndex("by_noteId", (q) => q.eq("noteId", args.noteId))
+      .collect();
+
+    for (const embedding of embeddings) {
+      await ctx.db.delete(embedding._id);
+    }
+
     await ctx.db.delete(args.noteId);
   },
 });
@@ -59,5 +86,34 @@ export const getUserNotes = query({
       .withIndex("by_userId", (q) => q.eq("userId", userId))
       .order("desc")
       .collect();
+  },
+});
+
+export const fetchNotesByEmbeddingIds = internalQuery({
+  args: {
+    embeddingIds: v.array(v.id("noteEmbeddings")),
+  },
+  handler: async (ctx, args) => {
+    const embeddings = [];
+    for (const id of args.embeddingIds) {
+      const embedding = await ctx.db.get(id);
+      if (embedding !== null) {
+        embeddings.push(embedding);
+      }
+    }
+
+    const uniqueNoteIds = [
+      ...new Set(embeddings.map((embedding) => embedding.noteId)),
+    ];
+
+    const results = [];
+    for (const id of uniqueNoteIds) {
+      const note = await ctx.db.get(id);
+      if (note !== null) {
+        results.push(note);
+      }
+    }
+
+    return results;
   },
 });
